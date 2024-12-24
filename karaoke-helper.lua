@@ -741,7 +741,7 @@ function empty_syllable(t)
 end
 
 --读变量函数：读取aegisub隐藏在subs里的信息
-function read_infos(subs, sel, tp)
+function read_infos(subs, sel)
 	local inum = 0
 	local info_table = {}
 	local style_table = {}
@@ -1114,7 +1114,7 @@ function check_subtitle_line(line, handle_style)
          (line.comment and line.effect=="karaoke"))
 end
 
-function set_style(subtitles, handle_style, handle_chord_style, advance_time, extend_time, sep_threshold, countdown)
+function set_style(subtitles, handle_style, handle_chord_style, advance_time, extend_time, sep_threshold, countdown, countdown_style)
     -- 无论歌词是否重叠，一定只产出两种样式：K1和K2，并且交错显示
     local layers = {}
     local layer_i = 0
@@ -1181,7 +1181,7 @@ function set_style(subtitles, handle_style, handle_chord_style, advance_time, ex
             local new_line = subtitles[index]
             new_line.style = "Intro"
             new_line.end_time = new_line.start_time + first_line_advanced_time[i]
-            new_line.text = "● ● ●"
+            new_line.text = countdown_style
             subtitles.insert(#subtitles + 1, new_line)
         end
     end
@@ -1224,9 +1224,16 @@ function delete_minus_kvalue(subtitles, selected_lines)
 end
 
 function macro_set_style(subtitles, selected_lines)
+	local inum, info_table, style_table = read_infos(subtitles, selected_lines)
+	local styles = {}
+	for i = 1, #style_table do
+		if style_table[i] then
+			table.insert(styles, style_table[i].name)
+		end
+	end
     config = {
-        {class="label", label="Karaoke line style:", x=0, y=0},
-        {class="edit", name="style", value="Default", x=1, y=0},
+        {class="label", label="需要转换为双行字幕的样式名:", x=0, y=0},
+        {class="dropdown", name="style", items=styles, value="Default", x=1, y=0},
         {class="label", label="每小节首句歌词额外提前显示的时间 (ms):", x=0, y=1},
         {class="floatedit", name="advance_time", value="2000", x=1, y=1},
 		{class="label", label="每小节最后一句歌词额外延后显示的时间 (ms):", x=0, y=2},
@@ -1235,10 +1242,100 @@ function macro_set_style(subtitles, selected_lines)
         {class="floatedit", name="sep_threshold", value="4000", x=1, y=3},
         {class="label", label="在每小节开始加入预备倒计时:", x=0, y=4},
         {class="checkbox", name="countdown", value=true, x=1, y=4},
+		{class="label", label="预备倒计时字幕:", x=0, y=5},
+        {class="edit", name="countdown_style", value="●●●", x=1, y=5},
     }
     btn, result = aegisub.dialog.display(config)
     if btn then
-        set_style(subtitles, result.style, result.chord_style, math.floor(result.advance_time), math.floor(result.extend_time), math.floor(result.sep_threshold), result.countdown)
+        set_style(subtitles, result.style, result.chord_style, math.floor(result.advance_time), math.floor(result.extend_time), math.floor(result.sep_threshold), result.countdown, result.countdown_style)
+    end
+end
+
+function align_translation(subtitles, karaoke_style, translation_style, interval_threshold, single_line)
+	-- 1. 找到所有的卡拉OK字幕的开始时间、结束时间
+	local start_times = {}
+	local end_times = {}
+	for i = 1, #subtitles do
+        local line = subtitles[i]
+        if check_subtitle_line(line, karaoke_style) then
+			table.insert(start_times, line.start_time)
+			table.insert(end_times, line.end_time)
+		end
+	end
+
+	-- 2. 对每一行翻译字幕，找到距离其最近的开始时间和结尾时间，并修改
+	for i = 1, #subtitles do
+        local line = subtitles[i]
+        if check_subtitle_line(line, translation_style) then
+			local min_interval = 10000.0
+			local min_time = 0.0
+			for index, value in ipairs(start_times) do
+				if math.abs(line.start_time - value) < min_interval then
+					min_interval = math.abs(line.start_time - value)
+					min_time = value
+				end
+			end
+			if min_interval < interval_threshold then
+				line.start_time = min_time
+			end
+
+			local min_interval = 10000.0
+			local min_time = 0.0
+			for index, value in ipairs(end_times) do
+				if math.abs(line.end_time - value) < min_interval then
+					min_interval = math.abs(line.end_time - value)
+					min_time = value
+				end
+			end
+			if min_interval < interval_threshold then
+				line.end_time = min_time
+			end
+
+			subtitles[i] = line
+		end
+	end
+
+	-- 3. 中文字幕一次性只能出现一行，把出现交错的字幕进行修改
+	if single_line then
+		local last_i = 0
+		for i = 1, #subtitles do
+			local line = subtitles[i]
+			if check_subtitle_line(line, translation_style) then
+				if last_i > 0 then
+					local last_line = subtitles[last_i]
+					if math.abs(line.start_time - last_line.end_time) < interval_threshold then
+						last_line.end_time = line.start_time
+						subtitles[last_i] = last_line
+					end
+				end
+				last_i = i
+			end
+		end
+	end
+end
+
+function macro_align_translation(subtitles, selected_lines)
+	local inum, info_table, style_table = read_infos(subtitles, selected_lines)
+	local styles = {}
+	for i = 1, #style_table do
+		if style_table[i] then
+			table.insert(styles, style_table[i].name)
+		end
+	end
+    config = {
+		{class="label", label="该功能最好在转换为双层交错字幕之前运行", x=0, y=0},
+        {class="label", label="卡拉OK字幕样式名:", x=0, y=1},
+        {class="dropdown", name="style", items=styles, value="Default", x=1, y=1},
+		{class="label", label="翻译字幕样式名:", x=0, y=2},
+        {class="dropdown", name="translation_style", items=styles, value="Chinese", x=1, y=2},
+		{class="label", label="最多允许调整的时间长度(ms):", x=0, y=3},
+        {class="floatedit", name="max_time", value="1000", x=1, y=3},
+		{class="label", label="确保一次只显示一行翻译字幕:", x=0, y=4},
+        {class="checkbox", name="single_line", value=true, x=1, y=4},
+    }
+    btn, result = aegisub.dialog.display(config)
+    if btn then
+        align_translation(subtitles, result.style, result.translation_style, result.max_time, result.single_line)
     end
 end
 
@@ -1266,6 +1363,12 @@ TLL_macros = {
 		script_name = "转换为双层交错形式",
 		script_description = "将连续的字幕转换为K1-K2双层交错的形式",
 		entry = function(subs,sel) macro_set_style(subs, sel) end,
+		validation = false
+	},
+	{
+		script_name = "将翻译字幕与卡拉OK字幕对齐",
+		script_description = "将不是很精确的翻译字幕与卡拉OK字幕对齐",
+		entry = function(subs,sel) macro_align_translation(subs, sel) end,
 		validation = false
 	},
 	{
